@@ -10,13 +10,53 @@ const io = new Server(server);
 
 app.use(express.static('public'));
 
-async function extrairEventosComRobo(ano, enviarLog) {
+let cacheFormulario = null;
+
+async function obterOpcoesFormulario() {
+    if (cacheFormulario) return cacheFormulario;
+    
+    try {
+        const response = await fetch('https://apl.utfpr.edu.br/extensao/certificados/listaPublica');
+        const html = await response.text();
+        const $ = cheerio.load(html);
+        
+        const campi = [];
+        $('select[name="txtCampus"] option').each((i, el) => {
+            const id = $(el).val();
+            const nome = $(el).text().trim();
+            if (id && id !== "") {
+                campi.push({ id: Number(id), nome });
+            }
+        });
+
+        const anos = [];
+        $('select[name="txtAno"] option').each((i, el) => {
+            const valor = $(el).val();
+            const texto = $(el).text().trim();
+            anos.push({ valor, texto });
+        });
+
+        cacheFormulario = { campi, anos };
+    } catch (error) {
+        console.error(error);
+        cacheFormulario = { campi: [], anos: [] };
+    }
+    
+    return cacheFormulario;
+}
+
+app.get('/api/opcoes', async (req, res) => {
+    const opcoes = await obterOpcoesFormulario();
+    res.json(opcoes);
+});
+
+async function extrairEventosComRobo(ano, campusId, enviarLog) {
     const { default: puppeteer } = await import('puppeteer');
     const browser = await puppeteer.launch({ headless: "new" }); 
     const page = await browser.newPage();
     
     await page.goto('https://apl.utfpr.edu.br/extensao/certificados/listaPublica');
-    await page.select('select[name="txtCampus"]', '2');
+    await page.select('select[name="txtCampus"]', campusId.toString());
     
     const navigationPromise = page.waitForNavigation({ waitUntil: 'networkidle2' });
     await page.evaluate((anoEscolhido) => {
@@ -37,8 +77,7 @@ async function extrairEventosComRobo(ano, enviarLog) {
     return eventos;
 }
 
-// Função auxiliar isolada para processar um único evento
-async function processarEvento(evento, nomeProcurado, ano, enviarLog, certificadosEncontrados) {
+async function processarEvento(evento, nomeProcurado, ano, campusId, campusNome, enviarLog, certificadosEncontrados) {
     let offset = 0;
     let paginaAtual = 1;
     let temMaisPaginas = true;
@@ -48,7 +87,7 @@ async function processarEvento(evento, nomeProcurado, ano, enviarLog, certificad
             ? 'https://apl.utfpr.edu.br/extensao/certificados/listaPublica' 
             : `https://apl.utfpr.edu.br/extensao/certificados/listaPublica/${offset}`;
 
-        const bodyData = new URLSearchParams({ txtCampus: '2', txtAno: ano.toString(), txtEvento: evento.id.toString() });
+        const bodyData = new URLSearchParams({ txtCampus: campusId.toString(), txtAno: ano.toString(), txtEvento: evento.id.toString() });
 
         try {
             const response = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: bodyData });
@@ -72,6 +111,7 @@ async function processarEvento(evento, nomeProcurado, ano, enviarLog, certificad
 
                     certificadosEncontrados.push({
                         nomeCertificado: textoTd,
+                        campus: campusNome,
                         evento: evento.nome,
                         id: evento.id,
                         pagina: paginaAtual,
@@ -99,29 +139,41 @@ async function processarEvento(evento, nomeProcurado, ano, enviarLog, certificad
     }
 }
 
-async function buscarCertificados(nomeProcurado, ano, enviarLog) {
-    const listaDeEventos = await extrairEventosComRobo(ano, enviarLog);
-
-    if (listaDeEventos.length === 0) {
-        return enviarLog("Nenhum evento encontrado.");
+async function buscarCertificados(nomeProcurado, ano, campusSelecionado, enviarLog) {
+    let certificadosEncontrados = [];
+    const tamanhoDoLote = 15; 
+    
+    const opcoesForm = await obterOpcoesFormulario();
+    const listaTodosCampi = opcoesForm.campi;
+    let campiParaBuscar = [];
+    
+    if (campusSelecionado === 'todos') {
+        campiParaBuscar = listaTodosCampi;
+    } else {
+        const campusEspecifico = listaTodosCampi.find(c => c.id == campusSelecionado);
+        if (campusEspecifico) campiParaBuscar.push(campusEspecifico);
     }
 
-    let certificadosEncontrados = [];
-    const tamanhoDoLote = 15; // Quantidade de requisições simultâneas
+    for (const campus of campiParaBuscar) {
+        enviarLog(`\n--- ACESSANDO CAMPUS: ${campus.nome.toUpperCase()} ---`);
+        const listaDeEventos = await extrairEventosComRobo(ano, campus.id, enviarLog);
 
-    enviarLog(`Iniciando busca paralela por "${nomeProcurado}" (Lotes de ${tamanhoDoLote})...\n`);
+        if (listaDeEventos.length === 0) {
+            enviarLog("Nenhum evento encontrado neste campus.");
+            continue; 
+        }
 
-    for (let i = 0; i < listaDeEventos.length; i += tamanhoDoLote) {
-        const lote = listaDeEventos.slice(i, i + tamanhoDoLote);
-        enviarLog(`Processando lote ${Math.floor(i / tamanhoDoLote) + 1}... (${lote.length} eventos)`);
-        
-        // Mapeia o lote atual para um array de Promises e executa todas ao mesmo tempo
-        const promessasDoLote = lote.map(evento => processarEvento(evento, nomeProcurado, ano, enviarLog, certificadosEncontrados));
-        
-        await Promise.all(promessasDoLote);
-        
-        // Pausa entre lotes para não derrubar o servidor
-        await new Promise(resolve => setTimeout(resolve, 1000));
+        for (let i = 0; i < listaDeEventos.length; i += tamanhoDoLote) {
+            const lote = listaDeEventos.slice(i, i + tamanhoDoLote);
+            enviarLog(`Processando lote ${Math.floor(i / tamanhoDoLote) + 1}... (${lote.length} eventos)`);
+            
+            const promessasDoLote = lote.map(evento => 
+                processarEvento(evento, nomeProcurado, ano, campus.id, campus.nome, enviarLog, certificadosEncontrados)
+            );
+            
+            await Promise.all(promessasDoLote);
+            await new Promise(resolve => setTimeout(resolve, 1000));
+        }
     }
 
     enviarLog("\n--- RELATORIO FINAL ---");
@@ -130,7 +182,8 @@ async function buscarCertificados(nomeProcurado, ano, enviarLog) {
         enviarLog(`Total de certificados encontrados: ${certificadosEncontrados.length}\n`);
         
         certificadosEncontrados.forEach((cert, index) => {
-            enviarLog(`[${index + 1}] Evento: ${cert.evento} (ID: ${cert.id})`);
+            enviarLog(`[${index + 1}] Campus: ${cert.campus}`);
+            enviarLog(`Evento: ${cert.evento} (ID: ${cert.id})`);
             enviarLog(`Nome: ${cert.nomeCertificado}`);
             enviarLog(`Pagina: ${cert.pagina}`);
             enviarLog(`Link: ${cert.link}\n`);
@@ -145,7 +198,7 @@ async function buscarCertificados(nomeProcurado, ano, enviarLog) {
 io.on('connection', (socket) => {
     socket.on('iniciar', async (dados) => {
         const enviarLog = (mensagem) => socket.emit('log', mensagem);
-        await buscarCertificados(dados.nome, dados.ano, enviarLog);
+        await buscarCertificados(dados.nome, dados.ano, dados.campus, enviarLog);
     });
 });
 

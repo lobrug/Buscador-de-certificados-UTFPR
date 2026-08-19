@@ -9,7 +9,7 @@
         h2 { margin-top: 0; color: #333; }
         .form-group { margin-bottom: 15px; }
         label { display: block; margin-bottom: 5px; font-weight: bold; }
-        input { width: 100%; padding: 10px; border: 1px solid #ccc; border-radius: 4px; box-sizing: border-box; }
+        input, select { width: 100%; padding: 10px; border: 1px solid #ccc; border-radius: 4px; box-sizing: border-box; }
         button { background-color: #0056b3; color: white; border: none; padding: 10px 20px; font-size: 16px; border-radius: 4px; cursor: pointer; width: 100%; }
         button:hover { background-color: #004494; }
         .terminal { background: #1e1e1e; color: #00ff00; font-family: monospace; padding: 15px; border-radius: 4px; margin-top: 20px; height: 300px; overflow-y: auto; white-space: pre-wrap; display: none; }
@@ -18,7 +18,7 @@
 <body>
 
 <div class="container">
-    <h2>🎓 Buscar Certificado</h2>
+    <h2>Buscar Certificado</h2>
     
     <div class="form-group">
         <label for="nome">Nome Completo (ou parte dele):</label>
@@ -27,17 +27,66 @@
     
     <div class="form-group">
         <label for="ano">Ano do Evento:</label>
-        <input type="number" id="ano" placeholder="Ex: 2026" value="2026">
+        <select id="ano">
+            <option value="">Carregando...</option>
+        </select>
+    </div>
+
+    <div class="form-group">
+        <label for="campus">Campus / Departamento:</label>
+        <select id="campus">
+            <option value="">Carregando...</option>
+        </select>
     </div>
     
     <button onclick="iniciarBusca()">Buscar Agora</button>
 
-    <!-- Nosso "Terminal" virtual -->
     <div class="terminal" id="terminal"></div>
 </div>
 
 <script src="/socket.io/socket.io.js"></script>
 <script>
+    async function carregarOpcoes() {
+        const selectCampus = document.getElementById('campus');
+        const selectAno = document.getElementById('ano');
+        
+        try {
+            const resposta = await fetch('/api/opcoes');
+            const dados = await resposta.json();
+            
+            selectAno.innerHTML = '';
+            dados.anos.forEach(ano => {
+                const option = document.createElement('option');
+                option.value = ano.valor;
+                option.text = ano.texto;
+                selectAno.appendChild(option);
+            });
+
+            selectCampus.innerHTML = '';
+            const optionTodos = document.createElement('option');
+            optionTodos.value = 'todos';
+            optionTodos.text = 'Varredura Completa (Todos)';
+            selectCampus.appendChild(optionTodos);
+
+            dados.campi.forEach(campus => {
+                const option = document.createElement('option');
+                option.value = campus.id;
+                option.text = campus.nome;
+                
+                if (campus.id === 2) {
+                    option.selected = true;
+                }
+                
+                selectCampus.appendChild(option);
+            });
+        } catch (error) {
+            selectCampus.innerHTML = '<option value="">Erro ao carregar campus</option>';
+            selectAno.innerHTML = '<option value="">Erro ao carregar anos</option>';
+        }
+    }
+
+    carregarOpcoes();
+
     const socket = io();
     const terminal = document.getElementById('terminal');
 
@@ -50,13 +99,14 @@
     function iniciarBusca() {
         const nome = document.getElementById('nome').value;
         const ano = document.getElementById('ano').value;
+        const campus = document.getElementById('campus').value;
         
-        if(!nome || !ano) return alert("Preencha o nome e o ano!");
+        if(!nome) return alert("Preencha o nome");
 
-        terminal.innerHTML = '';
-        escreverLog(`Iniciando busca por "${nome}" no ano de ${ano}...\n`);
+        terminal.innerHTML = ''; 
+        escreverLog(`Iniciando busca por "${nome}"...\n`);
         
-        socket.emit('iniciar', { nome, ano });
+        socket.emit('iniciar', { nome, ano, campus });
     }
 
     socket.on('log', (mensagem) => escreverLog(mensagem));
