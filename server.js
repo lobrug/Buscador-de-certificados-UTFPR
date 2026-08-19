@@ -33,100 +33,113 @@ async function extrairEventosComRobo(ano, enviarLog) {
     });
 
     await browser.close(); 
-    enviarLog(`Sucesso! Capturamos ${eventos.length} eventos.\n`);
+    enviarLog(`Eventos capturados: ${eventos.length}\n`);
     return eventos;
+}
+
+// Função auxiliar isolada para processar um único evento
+async function processarEvento(evento, nomeProcurado, ano, enviarLog, certificadosEncontrados) {
+    let offset = 0;
+    let paginaAtual = 1;
+    let temMaisPaginas = true;
+
+    while (temMaisPaginas) {
+        const url = offset === 0 
+            ? 'https://apl.utfpr.edu.br/extensao/certificados/listaPublica' 
+            : `https://apl.utfpr.edu.br/extensao/certificados/listaPublica/${offset}`;
+
+        const bodyData = new URLSearchParams({ txtCampus: '2', txtAno: ano.toString(), txtEvento: evento.id.toString() });
+
+        try {
+            const response = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: bodyData });
+            const html = await response.text();
+            const $ = cheerio.load(html);
+
+            $('td').each((index, element) => {
+                const textoTd = $(element).text().trim();
+                if (textoTd.toLowerCase().includes(nomeProcurado.toLowerCase())) {
+                    enviarLog(`Registro encontrado no evento: ${evento.nome}`);
+                    
+                    const linhaTr = $(element).closest('tr');
+                    const linkEncontrado = linhaTr.find('a').attr('href');
+                    
+                    let linkCompleto = "Link indisponivel";
+                    if (linkEncontrado) {
+                        linkCompleto = linkEncontrado.startsWith('/') 
+                            ? `https://apl.utfpr.edu.br${linkEncontrado}` 
+                            : linkEncontrado;
+                    }
+
+                    certificadosEncontrados.push({
+                        nomeCertificado: textoTd,
+                        evento: evento.nome,
+                        id: evento.id,
+                        pagina: paginaAtual,
+                        link: linkCompleto
+                    });
+                }
+            });
+
+            const proximoOffset = offset + 15;
+            const existeProximaPagina = $('a').toArray().some(el => {
+                const href = $(el).attr('href');
+                return href && href.includes(`/${proximoOffset}`);
+            });
+
+            if (existeProximaPagina) {
+                offset = proximoOffset;
+                paginaAtual++;
+            } else {
+                temMaisPaginas = false; 
+            }
+        } catch (error) {
+            enviarLog(`Erro no evento ${evento.id}: ${error.message}`);
+            temMaisPaginas = false; 
+        }
+    }
 }
 
 async function buscarCertificados(nomeProcurado, ano, enviarLog) {
     const listaDeEventos = await extrairEventosComRobo(ano, enviarLog);
 
     if (listaDeEventos.length === 0) {
-        return enviarLog("Nenhum evento encontrado. Encerrando.");
+        return enviarLog("Nenhum evento encontrado.");
     }
 
     let certificadosEncontrados = [];
+    const tamanhoDoLote = 15; // Quantidade de requisições simultâneas
 
-    enviarLog(`Iniciando varredura por "${nomeProcurado}" nas páginas dos eventos...\n
-=====================  Esta etapa pode demorar um pouco  =====================\n`);
+    enviarLog(`Iniciando busca paralela por "${nomeProcurado}" (Lotes de ${tamanhoDoLote})...\n`);
 
-    for (let i = 0; i < listaDeEventos.length; i++) {
-        const eventoId = listaDeEventos[i].id;
-        const nomeDoEvento = listaDeEventos[i].nome;
-        let encontrouNoEvento = false;
-        let offset = 0;
-        let paginaAtual = 1;
-        let temMaisPaginas = true;
-
-        enviarLog(`[${i + 1}/${listaDeEventos.length}] Verificando: ${nomeDoEvento}`);
-
-        while (temMaisPaginas) {
-            const url = offset === 0 
-                ? 'https://apl.utfpr.edu.br/extensao/certificados/listaPublica' 
-                : `https://apl.utfpr.edu.br/extensao/certificados/listaPublica/${offset}`;
-
-            const bodyData = new URLSearchParams({ txtCampus: '2', txtAno: ano.toString(), txtEvento: eventoId.toString() });
-
-            try {
-                const response = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: bodyData });
-                const html = await response.text();
-                const $ = cheerio.load(html);
-
-                $('td').each((index, element) => {
-                    const textoTd = $(element).text().trim();
-                    if (textoTd.toLowerCase().includes(nomeProcurado.toLowerCase())) {
-                        enviarLog(`\n🎉 ACHOU! (Adicionando ao relatório final...)`);
-                        encontrouNoEvento = true;
-                        
-                        // Salva os dados na nossa memória
-                        certificadosEncontrados.push({
-                            nomeCertificado: textoTd,
-                            evento: nomeDoEvento,
-                            id: eventoId,
-                            pagina: paginaAtual
-                        });
-                    }
-                });
-
-                const proximoOffset = offset + 15;
-                const existeProximaPagina = $('a').toArray().some(el => {
-                    const href = $(el).attr('href');
-                    return href && href.includes(`/${proximoOffset}`);
-                });
-
-                if (existeProximaPagina) {
-                    offset = proximoOffset;
-                    paginaAtual++;
-                    await new Promise(resolve => setTimeout(resolve, 500)); 
-                } else {
-                    temMaisPaginas = false; 
-                }
-            } catch (error) {
-                enviarLog(`⚠️ Erro no evento ${eventoId}: ${error.message}`);
-                temMaisPaginas = false; 
-            }
-        } 
+    for (let i = 0; i < listaDeEventos.length; i += tamanhoDoLote) {
+        const lote = listaDeEventos.slice(i, i + tamanhoDoLote);
+        enviarLog(`Processando lote ${Math.floor(i / tamanhoDoLote) + 1}... (${lote.length} eventos)`);
+        
+        // Mapeia o lote atual para um array de Promises e executa todas ao mesmo tempo
+        const promessasDoLote = lote.map(evento => processarEvento(evento, nomeProcurado, ano, enviarLog, certificadosEncontrados));
+        
+        await Promise.all(promessasDoLote);
+        
+        // Pausa entre lotes para não derrubar o servidor
         await new Promise(resolve => setTimeout(resolve, 1000));
     }
 
-
-    enviarLog("\n==================================================");
-    enviarLog("  RELATÓRIO FINAL DE BUSCA");
-    enviarLog("==================================================");
+    enviarLog("\n--- RELATORIO FINAL ---");
     
     if (certificadosEncontrados.length > 0) {
-        enviarLog(`Foram encontrados ${certificadosEncontrados.length} certificados para "${nomeProcurado}" no ano de ${ano}:\n`);
+        enviarLog(`Total de certificados encontrados: ${certificadosEncontrados.length}\n`);
         
         certificadosEncontrados.forEach((cert, index) => {
             enviarLog(`[${index + 1}] Evento: ${cert.evento} (ID: ${cert.id})`);
-            enviarLog(`    Nome no certificado: ${cert.nomeCertificado}`);
-            enviarLog(`    Página da lista: ${cert.pagina}\n`);
+            enviarLog(`Nome: ${cert.nomeCertificado}`);
+            enviarLog(`Pagina: ${cert.pagina}`);
+            enviarLog(`Link: ${cert.link}\n`);
         });
     } else {
-        enviarLog(`Nenhum certificado encontrado para "${nomeProcurado}" no ano de ${ano}.`);
+        enviarLog(`Nenhum resultado encontrado.`);
     }
     
-    enviarLog("==================================================\n");
-    enviarLog("Fim da varredura total!");
+    enviarLog("--- FIM DA BUSCA ---");
 }
 
 io.on('connection', (socket) => {
@@ -137,5 +150,5 @@ io.on('connection', (socket) => {
 });
 
 server.listen(3000, () => {
-    console.log('🌐 Servidor rodando! Acesse http://localhost:3000 no seu navegador.');
+    console.log('Servidor rodando em http://localhost:3000');
 });
