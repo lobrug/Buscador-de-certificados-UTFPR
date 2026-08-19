@@ -1,0 +1,9 @@
+{
+  "dependencies": {
+    "20": "^3.1.9",
+    "cheerio": "^1.2.0",
+    "express": "^5.2.1",
+    "puppeteer": "^25.8.0",
+    "socket.io": "^4.8.3"
+  }
+}
