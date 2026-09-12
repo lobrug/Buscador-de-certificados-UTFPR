@@ -5,6 +5,10 @@
 #include <QDate>
 #include <QPushButton>
 #include <QRegularExpression>
+#include <QRegularExpressionValidator>
+#include <QFileDialog>
+#include <QFile>
+#include <QDir>
 
 MainWindow::MainWindow(QWidget *parent)
     : QMainWindow(parent)
@@ -14,8 +18,19 @@ MainWindow::MainWindow(QWidget *parent)
 
     networkManager = new QNetworkAccessManager(this);
     connect(ui->btnBuscar, &QPushButton::clicked, this, &MainWindow::iniciarBusca);
+    connect(ui->btnCancelar, &QPushButton::clicked, this, &MainWindow::cancelarBusca);
+    connect(ui->btnBaixarTudo, &QPushButton::clicked, this, &MainWindow::baixarCertificados);
 
-    // Adiciona apenas o texto, sem o parâmetro de dados extra
+    ui->btnBaixarTudo->setEnabled(false);
+    ui->btnCancelar->setEnabled(false);
+    ui->barraProgresso->setValue(0);
+    buscaCancelada = false;
+
+    ui->inputNome->setPlaceholderText("Digite o nome (Ex: JOAO DA SILVA)");
+    QRegularExpression rx("^[a-zA-ZÀ-ÿ\\s]+$");
+    QValidator *validator = new QRegularExpressionValidator(rx, this);
+    ui->inputNome->setValidator(validator);
+
     ui->comboAno->addItem("Varredura Completa (Todos)");
     int anoAtualData = QDate::currentDate().year();
     for (int i = anoAtualData; i >= 2013; i--) {
@@ -55,8 +70,6 @@ MainWindow::MainWindow(QWidget *parent)
     ui->comboCampus->addItem("Toledo", 12);
 
     ui->comboCampus->setCurrentIndex(2);
-
-    // Estilização base do terminal (Fundo escuro, fonte monoespaçada)
     ui->terminalLog->setStyleSheet("QPlainTextEdit { background-color: #0c0c0c; font-family: 'Consolas'; font-size: 13px; }");
 }
 
@@ -77,10 +90,17 @@ void MainWindow::iniciarBusca()
         return;
     }
 
+    buscaCancelada = false;
     ui->btnBuscar->setEnabled(false);
+    ui->btnCancelar->setEnabled(true);
+    ui->btnBaixarTudo->setEnabled(false);
+    ui->btnBaixarTudo->setText("Baixar Todos");
+    ui->barraProgresso->setValue(0);
+
     ui->terminalLog->clear();
     filaCampus.clear();
     filaEventos.clear();
+    certificadosEncontrados.clear();
     requisicoesAtivas = 0;
 
     if (selecaoCampus == "todos") {
@@ -95,11 +115,27 @@ void MainWindow::iniciarBusca()
     processarProximoCampus();
 }
 
+void MainWindow::cancelarBusca()
+{
+    buscaCancelada = true;
+    filaCampus.clear();
+    filaEventos.clear();
+    ui->terminalLog->appendHtml("<br><span style='color:#ffaa00;'><b>[!] Busca cancelada. Aguardando finalização das requisições ativas...</b></span>");
+    ui->btnCancelar->setEnabled(false);
+}
+
 void MainWindow::processarProximoCampus()
 {
+    if (buscaCancelada) {
+        ui->btnBuscar->setEnabled(true);
+        return;
+    }
+
     if (filaCampus.isEmpty()) {
         ui->terminalLog->appendHtml("<br><span style='color:#55ff55;'><b>[!] Varredura concluída com sucesso.</b></span>");
         ui->btnBuscar->setEnabled(true);
+        ui->btnCancelar->setEnabled(false);
+        ui->barraProgresso->setValue(ui->barraProgresso->maximum());
         return;
     }
 
@@ -141,7 +177,12 @@ void MainWindow::processarProximoCampus()
                 ui->terminalLog->appendHtml("<span style='color:#ffaa00;'>Nenhum evento localizado neste câmpus.</span>");
                 processarProximoCampus();
             } else {
-                ui->terminalLog->appendHtml(QString("<span style='color:#cccccc;'>Mapeados %1 eventos. Iniciando concorrência...</span>").arg(filaEventos.size()));
+                totalEventosCampus = filaEventos.size();
+                eventosProcessadosCampus = 0;
+                ui->barraProgresso->setMaximum(totalEventosCampus);
+                ui->barraProgresso->setValue(0);
+
+                ui->terminalLog->appendHtml(QString("<span style='color:#cccccc;'>Mapeados %1 eventos. Iniciando concorrência...</span>").arg(totalEventosCampus));
                 processarLoteEventos();
             }
         } else {
@@ -154,6 +195,11 @@ void MainWindow::processarProximoCampus()
 
 void MainWindow::processarLoteEventos()
 {
+    if (buscaCancelada && requisicoesAtivas == 0) {
+        ui->btnBuscar->setEnabled(true);
+        return;
+    }
+
     if (filaEventos.isEmpty() && requisicoesAtivas == 0) {
         processarProximoCampus();
         return;
@@ -168,6 +214,12 @@ void MainWindow::processarLoteEventos()
 
 void MainWindow::buscarPaginaCertificados(Evento evento, int offset)
 {
+    if (buscaCancelada) {
+        requisicoesAtivas--;
+        processarLoteEventos();
+        return;
+    }
+
     QString urlStr = "https://apl.utfpr.edu.br/extensao/certificados/listaPublica";
     if (offset > 0) urlStr += "/" + QString::number(offset);
 
@@ -182,7 +234,7 @@ void MainWindow::buscarPaginaCertificados(Evento evento, int offset)
     QNetworkReply *reply = networkManager->post(request, params.toString(QUrl::FullyEncoded).toUtf8());
 
     connect(reply, &QNetworkReply::finished, this, [this, reply, evento, offset]() {
-        if (reply->error() == QNetworkReply::NoError) {
+        if (reply->error() == QNetworkReply::NoError && !buscaCancelada) {
             QString html = QString::fromUtf8(reply->readAll());
 
             QRegularExpression rowRegex("<tr[^>]*>(.*?)</tr>", QRegularExpression::DotMatchesEverythingOption);
@@ -201,6 +253,10 @@ void MainWindow::buscarPaginaCertificados(Evento evento, int offset)
                         link = "https://apl.utfpr.edu.br" + link;
                     }
 
+                    certificadosEncontrados.append(link);
+                    ui->btnBaixarTudo->setEnabled(true);
+                    ui->btnBaixarTudo->setText(QString("Baixar Todos (%1)").arg(certificadosEncontrados.size()));
+
                     ui->terminalLog->appendHtml(QString("<br><span style='color:#55ff55;'><b>[+] CERTIFICADO ENCONTRADO!</b></span>"
                                                         "<br><span style='color:#ffffff;'>Evento: %1</span>"
                                                         "<br><span style='color:#55aaff;'>Link: <a href='%2' style='color:#55aaff;'>%2</a></span>"
@@ -215,13 +271,80 @@ void MainWindow::buscarPaginaCertificados(Evento evento, int offset)
                 buscarPaginaCertificados(evento, proximoOffset);
             } else {
                 requisicoesAtivas--;
+                eventosProcessadosCampus++;
+                ui->barraProgresso->setValue(eventosProcessadosCampus);
                 processarLoteEventos();
             }
         } else {
-            ui->terminalLog->appendHtml(QString("<span style='color:#ff5555;'>Erro no evento %1: %2</span>").arg(evento.id, reply->errorString()));
+            if (!buscaCancelada) {
+                ui->terminalLog->appendHtml(QString("<span style='color:#ff5555;'>Erro no evento %1: %2</span>").arg(evento.id, reply->errorString()));
+            }
             requisicoesAtivas--;
+            eventosProcessadosCampus++;
+            ui->barraProgresso->setValue(eventosProcessadosCampus);
             processarLoteEventos();
         }
         reply->deleteLater();
     });
+}
+
+void MainWindow::baixarCertificados()
+{
+    if (certificadosEncontrados.isEmpty()) return;
+
+    QString diretorio = QFileDialog::getExistingDirectory(this, "Selecione a pasta para salvar os PDFs");
+    if (diretorio.isEmpty()) return;
+
+    ui->terminalLog->appendHtml("<br><span style='color:#55aaff;'>Iniciando extração e download em duas etapas...</span>");
+    ui->btnBaixarTudo->setEnabled(false);
+
+    for (int i = 0; i < certificadosEncontrados.size(); ++i) {
+        QString link = certificadosEncontrados.at(i);
+
+        QNetworkRequest request((QUrl(link)));
+        request.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
+
+        QNetworkReply *reply = networkManager->get(request);
+
+        connect(reply, &QNetworkReply::finished, this, [this, reply, diretorio, i]() {
+            if (reply->error() == QNetworkReply::NoError) {
+                QString html = QString::fromUtf8(reply->readAll());
+
+                QRegularExpression regex("<a\\s+href=\"([^\"]+)\"[^>]*>.*?Clique aqui para gerar o certificado", QRegularExpression::DotMatchesEverythingOption);
+                QRegularExpressionMatch match = regex.match(html);
+
+                if (match.hasMatch()) {
+                    QString linkReal = match.captured(1);
+
+                    QNetworkRequest reqPdf((QUrl(linkReal)));
+                    reqPdf.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
+                    QNetworkReply *replyPdf = networkManager->get(reqPdf);
+
+                    connect(replyPdf, &QNetworkReply::finished, this, [this, replyPdf, diretorio, i]() {
+                        if (replyPdf->error() == QNetworkReply::NoError) {
+                            QString nomeArquivo = diretorio + "/Certificado_UTFPR_" + QString::number(i + 1) + ".pdf";
+                            QFile arquivo(nomeArquivo);
+
+                            if (arquivo.open(QIODevice::WriteOnly)) {
+                                arquivo.write(replyPdf->readAll());
+                                arquivo.close();
+                                ui->terminalLog->appendHtml(QString("<span style='color:#55ff55;'>[OK] Certificado %1 salvo.</span>").arg(i + 1));
+                            } else {
+                                ui->terminalLog->appendHtml(QString("<span style='color:#ff5555;'>[ERRO] Falha ao escrever arquivo %1.</span>").arg(i + 1));
+                            }
+                        } else {
+                            ui->terminalLog->appendHtml(QString("<span style='color:#ff5555;'>[ERRO] Falha na etapa 2 (Download) %1: %2</span>").arg(QString::number(i + 1), replyPdf->errorString()));
+                        }
+                        replyPdf->deleteLater();
+                    });
+
+                } else {
+                    ui->terminalLog->appendHtml(QString("<span style='color:#ffaa00;'>[AVISO] Certificado %1 ignorado. Botão de download não encontrado na página.</span>").arg(i + 1));
+                }
+            } else {
+                ui->terminalLog->appendHtml(QString("<span style='color:#ff5555;'>[ERRO] Falha na etapa 1 (Acesso aos detalhes) %1: %2</span>").arg(QString::number(i + 1), reply->errorString()));
+            }
+            reply->deleteLater();
+        });
+    }
 }

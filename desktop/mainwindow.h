@@ -25,9 +25,11 @@ public:
 
 private slots:
     void iniciarBusca();
+    void cancelarBusca();
     void processarProximoCampus();
     void processarLoteEventos();
     void buscarPaginaCertificados(Evento evento, int offset);
+    void baixarCertificados();
 
 private:
     Ui::MainWindow *ui;
@@ -35,12 +37,19 @@ private:
 
     QList<QString> filaCampus;
     QList<Evento> filaEventos;
+    QList<QString> certificadosEncontrados;
+
     QString nomeBuscado;
     QString campusAtual;
     QString anoAtual;
 
     int requisicoesAtivas;
-    const int limiteConcorrencia = 15;
+    const int limiteConcorrencia = 50;
+
+    // Variáveis de controle para progresso e cancelamento
+    int totalEventosCampus;
+    int eventosProcessadosCampus;
+    bool buscaCancelada;
 };
 
 #endif // MAINWINDOW_H
